@@ -25,7 +25,8 @@ NR_OF_GRAY = 2 ** 14  # number of grayscale levels to use in CLAHE algorithm
 
 @adapt_rgb(hsv_value)
 def equalize_adapthist(image, kernel_size=None,
-                       clip_limit=0.01, nbins=256):
+                       clip_limit=0.01, nbins=256,
+                       rescale=True):
     """Contrast Limited Adaptive Histogram Equalization (CLAHE).
 
     An algorithm for local contrast enhancement, that uses histograms computed
@@ -36,7 +37,7 @@ def equalize_adapthist(image, kernel_size=None,
     ----------
     image : (N1, ...,NN[, C]) ndarray
         Input image.
-    kernel_size : int or array_like, optional
+    kernel_size: int or array_like, optional
         Defines the shape of contextual regions used in the algorithm. If
         iterable is passed, it must have the same number of elements as
         ``image.ndim`` (without color channel). If integer, it is broadcasted
@@ -75,23 +76,41 @@ def equalize_adapthist(image, kernel_size=None,
     .. [2] https://en.wikipedia.org/wiki/CLAHE#CLAHE
     """
 
+    if clip_limit == 1.0:
+        return img_as_float(image)  # convert to float for consistency
+
     image = img_as_uint(image)
-    image = np.round(
-        rescale_intensity(image, out_range=(0, NR_OF_GRAY - 1))
-    ).astype(np.uint16)
+    if rescale:
+        image = rescale_intensity(
+            image,
+            out_range=(0, NR_OF_GRAY - 1))
+    else:
+        image = rescale_intensity(
+            image,
+            in_range='dtype',
+            out_range=(0, NR_OF_GRAY - 1))
+    image = np.round(image).astype(np.uint16)
 
     if kernel_size is None:
-        kernel_size = tuple([max(s // 8, 1) for s in image.shape])
+        kernel_size = tuple([image.shape[dim] // 8
+                             for dim in range(image.ndim)])
     elif isinstance(kernel_size, numbers.Number):
         kernel_size = (kernel_size,) * image.ndim
     elif len(kernel_size) != image.ndim:
-        ValueError(f'Incorrect value of `kernel_size`: {kernel_size}')
+        ValueError('Incorrect value of `kernel_size`: {}'.format(kernel_size))
 
     kernel_size = [int(k) for k in kernel_size]
 
     image = _clahe(image, kernel_size, clip_limit, nbins)
-    image = img_as_float(image)
-    return rescale_intensity(image)
+
+    if rescale:
+        image = img_as_float(image)
+        return rescale_intensity(image)
+    else:
+        # need to multiply the result by 4, since the dtype is uint16, but the
+        # maximally possible value is 2**14 (i.e., ¼ of 2**16)
+        image = img_as_float(image) * 4.0
+        return image
 
 
 def _clahe(image, kernel_size, clip_limit, nbins):
@@ -101,11 +120,10 @@ def _clahe(image, kernel_size, clip_limit, nbins):
     ----------
     image : (N1,...,NN) ndarray
         Input image.
-    kernel_size : int or N-tuple of int
+    kernel_size: int or N-tuple of int
         Defines the shape of contextual regions used in the algorithm.
     clip_limit : float
-        Normalized clipping limit between 0 and 1 (higher values give more
-        contrast).
+        Normalized clipping limit (higher values give more contrast).
     nbins : int
         Number of gray bins for histogram ("data range").
 
@@ -115,9 +133,10 @@ def _clahe(image, kernel_size, clip_limit, nbins):
         Equalized image.
 
     The number of "effective" graylevels in the output image is set by `nbins`;
-    selecting a small value (e.g. 128) speeds up processing and still produces
-    an output image of good quality. A clip limit of 0 or larger than or equal
-    to 1 results in standard (non-contrast limited) AHE.
+    selecting a small value (eg. 128) speeds up processing and still produce
+    an output image of good quality. The output image will have the same
+    minimum and maximum value as the input image. A clip limit smaller than 1
+    results in standard (non-contrast limited) AHE.
     """
     ndim = image.ndim
     dtype = image.dtype
@@ -158,8 +177,7 @@ def _clahe(image, kernel_size, clip_limit, nbins):
     if clip_limit > 0.0:
         clim = int(np.clip(clip_limit * np.product(kernel_size), 1, None))
     else:
-        # largest possible value, i.e., do not clip (AHE)
-        clim = np.product(kernel_size)
+        clim = NR_OF_GRAY  # Large value, do not clip (AHE)
 
     hist = np.apply_along_axis(np.bincount, -1, hist_blocks, minlength=nbins)
     hist = np.apply_along_axis(clip_histogram, -1, hist, clip_limit=clim)
